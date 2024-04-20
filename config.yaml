@@ -1,0 +1,109 @@
+[root@ip-172-31-46-171 ~]# cat /opt/aws/aws-otel-collector/etc/config.yaml
+extensions:
+  sigv4auth:
+    service: "aps"
+    region: "us-east-2"
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+  prometheus:
+    config:
+      scrape_configs:
+      - job_name: 'adot_collector'
+        scrape_interval: 10s
+        static_configs:
+        - targets: ['localhost:8888']
+
+      - job_name: 'node_exporter'
+        scrape_interval: 10s
+        static_configs:
+        - targets: ['localhost:9100']
+  filelog:
+    include: [ /var/log/* ]
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%d %H:%M:%S'
+
+  awsxray:
+    endpoint: 0.0.0.0:2000
+    transport: udp
+    proxy_server:
+      endpoint: 0.0.0.0:2000
+      proxy_address: ""
+      tls:
+        insecure: false
+        server_name_override: ""
+      region: "us-east-2"
+      role_arn: ""
+      aws_endpoint: ""
+      local_mode: false
+exporters:
+  awsxray:
+    region: "us-east-2"
+  awsemf:
+    region: "us-east-2"
+    namespace: AWSOTel/Application/CPU
+    #log_group_name: '/aws/AWSOTEL/metrics'
+    resource_to_telemetry_conversion:
+      enabled: true
+    dimension_rollup_option: "NoDimensionRollup"
+    metric_declarations:
+      dimensions:
+        - ["host.id"]
+  prometheusremotewrite:
+    endpoint: "https://aps-workspaces.us-east-2.amazonaws.com/workspaces/ws-69975d73-029b-4613-90f1-210cbf242bfb/api/v1/remote_write"
+    auth:
+      authenticator: sigv4auth
+    resource_to_telemetry_conversion:
+      enabled: true
+  logging:
+    loglevel: debug
+
+  awscloudwatchlogs:
+    log_group_name: "filelogs"
+    log_stream_name: "filelog-streams"
+    raw_log: true
+    region: "us-east-2"
+    endpoint: "logs.us-east-2.amazonaws.com"
+    log_retention: 1
+    tags: { 'generator': 'adotlogs'}
+
+processors:
+  resourcedetection/ec2:
+    detectors: ["ec2"]
+
+  batch:
+    send_batch_size: 10000
+    timeout: 10s
+  batch/traces:
+    timeout: 10s
+    send_batch_size: 50
+  batch/metrics:
+    timeout: 60s
+
+service:
+  extensions: [sigv4auth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      #processors: [batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [prometheus]
+      #processors: [resourcedetection/ec2,batch]
+      processors: [resourcedetection/ec2]
+      exporters: [awsemf,logging]
+    metrics/2:
+      receivers: [prometheus]
+      processors: [resourcedetection/ec2]
+      #pocessors: [resourcedetection/ec2,batch]
+      exporters: [prometheusremotewrite,logging]
+    logs:
+      receivers: [filelog]
+      #processors: [batch]
+      exporters: [awscloudwatchlogs]
