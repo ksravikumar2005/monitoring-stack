@@ -33,38 +33,23 @@ rpm -ivh https://aws-otel-collector.s3.amazonaws.com/amazon_linux/amd64/latest/a
 
 # ADOT Collector Config
 cat <<EOF > /opt/aws/aws-otel-collector/etc/config.yaml
-extensions:
-  sigv4auth:
-    service: "aps"
-    region: "us-east-2"
-
-receivers:
-  otlp:
+extensions:  sigv4auth:
+    service: "aps"    region: "us-east-2"
+receivers:  otlp:
     protocols:
       grpc:
-      http:
-  prometheus:
+      http:  prometheus:
     config:
-      scrape_configs:
-      - job_name: 'adot_collector'
-        scrape_interval: 10s
-        static_configs:
+      scrape_configs:      - job_name: 'adot_collector'
+        scrape_interval: 10s        static_configs:
         - targets: ['localhost:8888']
-
-      - job_name: 'node_exporter'
-        scrape_interval: 10s
-        static_configs:
-        - targets: ['localhost:9100']
-  filelog:
-    include: [ /var/log/* ]
-    operators:
-      - type: json_parser
-        timestamp:
-parse_from: attributes.time
-layout: '%Y-%m-%d %H:%M:%S'
-
-  awsxray:
-    endpoint: 0.0.0.0:2000
+      - job_name: 'node_exporter'        scrape_interval: 10s
+        static_configs:        - targets: ['localhost:9100']
+  filelog:    include: [ /var/log/* ]
+    operators:      - type: json_parser
+        timestamp:          parse_from: attributes.time
+          layout: '%Y-%m-%d %H:%M:%S'
+  awsxray:    endpoint: 0.0.0.0:2000
     transport: udp
     proxy_server:
       endpoint: 0.0.0.0:2000
@@ -140,7 +125,7 @@ service:
     logs:
       receivers: [filelog]
       #processors: [batch]
-      exporters: [awscloudwatchlogs]      
+      exporters: [awscloudwatchlogs]    
 EOF
 
 # ADOT Collector service
