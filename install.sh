@@ -28,6 +28,9 @@ systemctl daemon-reload
 systemctl enable jaeger
 systemctl start jaeger
 
+# Setup ADOT Collector
+rpm -ivh https://aws-otel-collector.s3.amazonaws.com/amazon_linux/amd64/latest/aws-otel-collector.rpm
+
 # ADOT Collector Config
 cat <<EOF > /opt/aws/aws-otel-collector/etc/config.yaml
 extensions:

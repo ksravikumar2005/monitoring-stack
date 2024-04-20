@@ -4,6 +4,7 @@ Parameters:
   ScriptURL:
     Type: String
     Description: URL of the script is stored
+    Default: https://raw.githubusercontent.com/ksravikumar2005/monitoring-stack/main/install.sh
   BucketName:
     Type: String
     Description: The name of the S3 bucket for Loki storage
@@ -119,7 +120,11 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           yum update -y
-          yum install -y wget unzip
+          yum install -y wget unzip dos2unix
+          wget ${ScriptURL} -O /tmp/install.sh
+          chmod +x /tmp/install.sh
+          dos2unix /tmp/install.sh
+          /tmp/install.sh
           # Create users for Nginx, Promtail, Loki, and Grafana
           useradd -r -d /var/cache/nginx -s /sbin/nologin nginx
           useradd -s /sbin/nologin promtail
@@ -152,7 +157,7 @@ Resources:
               address: 127.0.0.1
               ring:
                 kvstore:
-          	store: inmemory
+                store: inmemory
                 replication_factor: 1
               final_sleep: 0s
             chunk_idle_period: 5m
@@ -168,8 +173,8 @@ Resources:
                 object_store: s3
                 schema: v11
                 index:
-          	prefix: index_loki_
-          	period: 24h
+                prefix: index_loki_
+                period: 24h
 
           storage_config:
             boltdb_shipper:
@@ -356,6 +361,7 @@ Resources:
           EOF
 
           yum install grafana -y
+          sudo yum install -y https://dl.grafana.com/enterprise/release/grafana-enterprise-11.0.0~preview-1.x86_64.rpm
           chown grafana:grafana /usr/sbin/grafana-server
 
           cat << 'EOF' | sudo tee /etc/grafana/provisioning/datasources/loki-datasource.yml
@@ -466,24 +472,24 @@ Resources:
             - job_name: system
               static_configs:
                 - targets:
-          - localhost
-          	labels:
-          job: system_logs
-          __path__: /var/log/*.*
+                    - localhost
+                  labels:
+                    job: system_logs
+                    __path__: /var/log/*.*
             - job_name: nginx
               static_configs:
                 - targets:
-          - localhost
-          	labels:
-          job: nginx_logs
-          __path__: /var/log/nginx/*.log
+                    - localhost
+                  labels:
+                    job: nginx_logs
+                    __path__: /var/log/nginx/*.log
             - job_name: grafana
               static_configs:
                 - targets:
-          - localhost
-          	labels:
-          job: grafana_logs
-          __path__: /var/log/grafana/*.log*
+                    - localhost
+                  labels:
+                    job: grafana_logs
+                    __path__: /var/log/grafana/*.log*
           EOF
 
           cat << 'EOF' | sudo tee /etc/systemd/system/promtail.service
