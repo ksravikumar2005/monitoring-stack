@@ -124,7 +124,7 @@ Resources:
           wget ${ScriptURL} -O /tmp/install.sh
           chmod +x /tmp/install.sh
           dos2unix /tmp/install.sh
-          /tmp/install.sh
+          # /tmp/install.sh
           # Create users for Nginx, Promtail, Loki, and Grafana
           useradd -r -d /var/cache/nginx -s /sbin/nologin nginx
           useradd -s /sbin/nologin promtail
@@ -396,8 +396,7 @@ Resources:
           # Dashboard Setup
           mkdir -p /var/lib/grafana/dashboards
           wget https://grafana.com/api/dashboards/1860/revisions/33/download -O /var/lib/grafana/dashboards/dashboard_1860.json
-          #wget https://grafana.com/api/dashboards/3662/revisions/2/download -O /var/lib/grafana/dashboards/dashboard_3662.json
-          # Add dashboard provisioning file
+          wget https://grafana.com/api/dashboards/3662/revisions/2/download -O /var/lib/grafana/dashboards/dashboard_3662.json
           cat << 'EOF' | sudo tee /etc/grafana/provisioning/dashboards/dashboard_provider.yml
           apiVersion: 1
 
