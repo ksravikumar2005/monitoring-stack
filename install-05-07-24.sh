@@ -276,33 +276,12 @@ Type=simple
 ExecStart=/usr/local/bin/thanos sidecar \
   --tsdb.path /var/lib/prometheus/ \
   --prometheus.url http://localhost:9090 \
-  --objstore.config-file=/path/to/bucket_config.yaml \
+  --objstore.config-file=/etc/thanos_config.yaml \
   --http-address 0.0.0.0:19190 \
   --grpc-address 0.0.0.0:19090
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-# Create S3 bucket config file
-cat <<EOF > /path/to/bucket_config.yaml
-type: S3
-config:
-  bucket: "your-s3-bucket-name"
-  endpoint: "s3.amazonaws.com"
-  access_key: "your-access-key"
-  secret_key: "your-secret-key"
-  insecure: false
-  signature_version2: false
-  encrypt_sse: false
-  put_user_metadata: {}
-  http_config:
-    idle_conn_timeout: 90s
-    response_header_timeout: 2m
-    insecure_skip_verify: false
-  trace:
-    enable: false
-  part_size: 134217728
 EOF
 
 # Enable and start Thanos Sidecar service

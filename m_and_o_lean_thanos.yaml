@@ -1,0 +1,570 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EC2 based Observability stack for metrics, logs and traces
+Parameters:
+  ScriptURL:
+    Type: String
+    Description: URL of the script is stored
+    Default: https://raw.githubusercontent.com/ksravikumar2005/monitoring-stack/main/install-05-07-24.sh
+  BucketName:
+    Type: String
+    Description: The name of the S3 bucket for Loki storage
+  ThanosBucketName:
+    Type: String
+    Description: The name of the Thanos bucket for Thanos storage
+  LokiUsername:
+    Type: String
+    Description: Username of Loki
+  LokiPassword:
+    Type: String
+    NoEcho: true
+    Description: Password for LokiUser
+  GrafanaUsername:
+    Type: String
+    Description: Username for Grafana login
+  GrafanaPassword:
+    Type: String
+    NoEcho: true
+    Description: Password for Grafana login
+  Region:
+    Type: String
+    Default: us-east-2
+    Description: Region to host the EC2 instance
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  UseAmpWorkspaceId:
+    Type: String
+    AllowedValues:
+      - "yes"
+      - "no"
+    Default: "no"
+    Description: Select 'yes' if you want to provide an Amazon Managed Service for Prometheus Workspace ID.
+  AmpWorkspaceId:
+    Type: String
+    Default: ""
+    Description: Provide your Amazon Managed Service for Prometheus Workspace ID. Leave blank if 'UseAmpWorkspaceId' is 'no'.
+
+Conditions:
+  IncludeAmpWorkspaceId: !Equals [!Ref UseAmpWorkspaceId, "yes"]
+
+Resources:
+  CWLokiSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Grafana UI ports
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3000'
+          ToPort: '3000'
+          CidrIp: 1.1.1.1/0
+
+  LokiBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref BucketName
+
+  ThanosBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref ThanosBucketName
+      
+  InstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: LokiS3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${BucketName}/*'
+                  - !Sub 'arn:aws:s3:::${BucketName}'
+                  - !Sub 'arn:aws:s3:::${ThanosBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${ThanosBucketName}'
+        - PolicyName: AmazonPrometheusWriteAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "aps:PutMetricData"
+                  - "aps:RemoteWrite"
+                Resource: "*" 
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - Ref: InstanceRole
+
+  CWLokiEC2Instance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: t2.micro
+      SecurityGroups:
+        - !Ref CWLokiSecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !Ref LatestAmiId
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y wget unzip dos2unix
+          wget ${ScriptURL} -O /tmp/install.sh
+          chmod +x /tmp/install.sh
+          dos2unix /tmp/install.sh
+          # /tmp/install.sh
+          # Create users for Nginx, Promtail, Loki, and Grafana
+          useradd -r -d /var/cache/nginx -s /sbin/nologin nginx
+          useradd -s /sbin/nologin promtail
+          useradd -s /sbin/nologin loki
+          useradd -s /sbin/nologin grafana
+          useradd -s /sbin/nologin prometheus
+          useradd -s /sbin/nologin node_exporter
+          # Needed for promtail to read files /var folder
+          usermod -a -G root promtail 
+          usermod -a -G loki promtail
+          usermod -a -G grafana promtail 
+          usermod -a -G nginx promtail
+
+
+           # Setup Loki with S3
+          wget https://github.com/grafana/loki/releases/download/v2.9.1/loki-linux-amd64.zip
+          unzip loki-linux-amd64.zip
+          mv loki-linux-amd64 /usr/local/bin/loki
+          chown loki:loki /usr/local/bin/loki
+          # Configure Loki specific directories
+          mkdir /var/loki
+          chown loki:loki /var/loki
+
+          # Create S3 bucket config file
+	  cat <<EOF > /etc/thanos_config.yaml
+	  type: S3
+	  config:
+	    bucket: ${ThanosBucketName}
+	    endpoint: "s3.amazonaws.com"
+	    insecure: false
+	    signature_version2: false
+	    encrypt_sse: false
+	    put_user_metadata: {}
+	    http_config:
+	      idle_conn_timeout: 90s
+	      response_header_timeout: 2m
+	      insecure_skip_verify: false
+	    trace:
+	      enable: false
+	    part_size: 134217728
+            EOF
+
+          cat << 'EOF' | sudo tee /etc/loki-config.yaml
+          auth_enabled: false
+          server:
+            http_listen_port: 3100
+          ingester:
+            lifecycler:
+              address: 127.0.0.1
+              ring:
+                kvstore:
+                  store: inmemory
+                replication_factor: 1
+              final_sleep: 0s
+            chunk_idle_period: 5m
+            chunk_retain_period: 30s
+            max_transfer_retries: 0
+            wal:
+             dir: "/var/loki/wal"
+
+          schema_config:
+            configs:
+              - from: 2020-10-24
+                store: boltdb-shipper
+                object_store: s3
+                schema: v11
+                index:
+                  prefix: index_loki_
+                  period: 24h
+
+          storage_config:
+            boltdb_shipper:
+              active_index_directory: /var/loki/boltdb-shipper-active
+              cache_location: /var/loki/boltdb-shipper-cache
+              cache_ttl: 24h # Can be adjusted
+              shared_store: s3
+
+            aws:
+              s3: s3://${BucketName}  # The S3 bucket
+              s3forcepathstyle: true   
+              bucketnames: ${BucketName}
+              region: ${Region}
+
+          compactor:
+            working_directory: /var/loki/data/retention
+            compaction_interval: 10m
+            retention_enabled: true
+            retention_delete_delay: 2h
+            retention_delete_worker_count: 150
+            shared_store: s3
+
+          limits_config:
+            enforce_metric_name: false
+            reject_old_samples: true
+            reject_old_samples_max_age: 168h
+
+          chunk_store_config:
+            max_look_back_period: 0s
+          EOF
+
+          cat << 'EOF' | sudo tee /etc/systemd/system/loki.service
+          [Unit]
+          Description=Loki service
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=loki
+          ExecStart=/usr/local/bin/loki -config.file=/etc/loki-config.yaml
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          sudo systemctl daemon-reload
+          sudo systemctl start loki
+          sudo systemctl enable loki
+
+
+          # Install NGINX
+          sudo amazon-linux-extras install -y nginx1
+          yum install httpd-tools -y
+
+          # TLS Certs.
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600") 
+          EC2_PUBLIC_DNS_NAME=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/public-hostname) 
+          CA_DIR="/etc/ssl/ca" && CERT_DIR="/etc/ssl/self-signed" && PASSPHRASE_CA=$(openssl rand -base64 32) && mkdir -p $CA_DIR && openssl genrsa -aes256 -out $CA_DIR/ca.key -passout pass:$PASSPHRASE_CA && openssl req -x509 -new -key $CA_DIR/ca.key -out $CA_DIR/ca.crt -days 365 -subj "/CN=MyCA" -passin pass:$PASSPHRASE_CA && mkdir -p $CERT_DIR && PASSPHRASE_CERT=$(openssl rand -base64 32) && openssl genrsa -aes256 -out $CERT_DIR/localhost.key -passout pass:$PASSPHRASE_CERT && openssl req -new -key $CERT_DIR/localhost.key -out $CERT_DIR/localhost.csr -subj "/CN=localhost" -passin pass:$PASSPHRASE_CERT && openssl x509 -req -in $CERT_DIR/localhost.csr -CA $CA_DIR/ca.crt -CAkey $CA_DIR/ca.key -CAcreateserial -out $CERT_DIR/localhost.crt -days 365 -passin pass:$PASSPHRASE_CA && chmod 600 $CERT_DIR/localhost.key $CERT_DIR/localhost.crt
+          openssl rsa -in $CA_DIR/ca.key -out $CA_DIR/ca.key -passin pass:$PASSPHRASE_CA && openssl rsa -in $CERT_DIR/localhost.key -out $CERT_DIR/localhost.key -passin pass:$PASSPHRASE_CERT
+          openssl genrsa -aes256 -out $CERT_DIR/$EC2_PUBLIC_DNS_NAME.key -passout pass:$PASSPHRASE_CERT && openssl req -new -key $CERT_DIR/$EC2_PUBLIC_DNS_NAME.key -out $CERT_DIR/$EC2_PUBLIC_DNS_NAME.csr -subj "/CN=$EC2_PUBLIC_DNS_NAME" -passin pass:$PASSPHRASE_CERT && openssl x509 -req -in $CERT_DIR/$EC2_PUBLIC_DNS_NAME.csr -CA $CA_DIR/ca.crt -CAkey $CA_DIR/ca.key -CAcreateserial -out $CERT_DIR/$EC2_PUBLIC_DNS_NAME.crt -days 365 -passin pass:$PASSPHRASE_CA && chmod 600 $CERT_DIR/$EC2_PUBLIC_DNS_NAME.key $CERT_DIR/$EC2_PUBLIC_DNS_NAME.crt
+          openssl rsa -in $CA_DIR/ca.key -out $CA_DIR/ca.key -passin pass:$PASSPHRASE_CA && openssl rsa -in $CERT_DIR/$EC2_PUBLIC_DNS_NAME.key -out $CERT_DIR/$EC2_PUBLIC_DNS_NAME.key -passin pass:$PASSPHRASE_CERT
+
+          # promtail access
+          chmod -R 755 /etc/ssl
+          # Setup password for the loki user
+          echo "${LokiPassword}" | htpasswd -i -c /etc/nginx/passwords ${LokiUsername}
+
+          # NGINX configuration
+          cat << 'EOF' | sudo tee /etc/nginx/nginx.conf 
+          user nginx;
+          worker_processes auto;
+          pid /run/nginx.pid;
+          include /etc/nginx/modules-enabled/*.conf;
+          worker_rlimit_nofile 100000;
+
+          events {
+          	worker_connections 4000;
+          	use epoll;
+          	multi_accept on;
+          }
+
+          http {
+              sendfile on;
+              tcp_nopush on;
+              tcp_nodelay on;
+              keepalive_timeout 65;
+              types_hash_max_size 2048;
+              open_file_cache_valid 30s;
+              open_file_cache_min_uses 2;
+              open_file_cache_errors on;
+
+              include /etc/nginx/mime.types;
+              default_type application/octet-stream;
+
+              ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+              ssl_prefer_server_ciphers on;
+
+              map $http_upgrade $connection_upgrade {
+            default upgrade;
+            '' close;
+              }
+
+              access_log off;
+              access_log /var/log/nginx/access.log;
+              error_log /var/log/nginx/error.log;
+
+              gzip on;
+              gzip_min_length 10240;
+              gzip_comp_level 1;
+              gzip_vary on;
+              gzip_disable msie6;
+              gzip_proxied expired no-cache no-store private auth;
+              gzip_types text/css text/javascript text/xml text/plain text/x-component application/javascript application/x-javascript application/json application/xml application/rss+xml application/atom+xml font/truetype font/opentype application/vnd.ms-fontobject image/svg+xml;
+
+              reset_timedout_connection on;
+              client_body_timeout 10;
+              send_timeout 2;
+              keepalive_requests 100000;
+
+              include /etc/nginx/conf.d/*.conf;
+          }
+          EOF
+
+          # Setup NGINX
+          cat << 'EOF' | sudo tee /etc/nginx/conf.d/loki.conf
+          upstream loki {
+            server 127.0.0.1:3100;
+            keepalive 15;
+          }
+
+
+          server {
+            listen 443 ssl;
+            server_name localhost;
+            ssl_certificate /etc/ssl/self-signed/localhost.crt;  # Path to your certificate file
+            ssl_certificate_key /etc/ssl/self-signed/localhost.key;  # Path to your private key file
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384';
+            ssl_prefer_server_ciphers off;
+
+            ssl_stapling on;
+            ssl_stapling_verify on;
+            resolver 8.8.8.8 8.8.4.4 valid=300s;
+            resolver_timeout 5s;
+
+            add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+            auth_basic "loki auth";
+            auth_basic_user_file /etc/nginx/passwords;
+
+            location / {
+              proxy_read_timeout 1800s;
+              proxy_connect_timeout 1600s;
+              proxy_pass http://loki;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection $connection_upgrade;
+              proxy_set_header Connection "Keep-Alive";
+              proxy_set_header Proxy-Connection "Keep-Alive";
+              proxy_redirect off;
+            }
+
+          }
+
+          EOF
+
+          chown -R nginx:nginx /etc/nginx
+          systemctl start nginx
+          systemctl enable nginx
+
+          # Install Grafana
+          cat << 'EOF' | sudo tee /etc/yum.repos.d/grafana.repo
+          [grafana]
+          name=grafana
+          baseurl=https://packages.grafana.com/oss/rpm
+          repo_gpgcheck=1
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://packages.grafana.com/gpg.key
+          sslverify=1
+          sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+          EOF
+
+          yum install grafana -y
+          sudo yum install -y https://dl.grafana.com/enterprise/release/grafana-enterprise-11.0.0~preview-1.x86_64.rpm
+          chown grafana:grafana /usr/sbin/grafana-server
+
+          cat << 'EOF' | sudo tee /etc/grafana/provisioning/datasources/loki-datasource.yml
+          apiVersion: 1
+          datasources:
+          - name: Loki_https
+            type: loki
+            access: proxy
+            url: https://localhost
+            basicAuth: true
+            basicAuthUser: ${LokiUsername}
+            jsonData:
+              maxLines: 1000
+              tlsSkipVerify: true #skip TLS verification
+            secureJsonData:
+              basicAuthPassword: ${LokiPassword} 
+            version: 1
+          - name: Prometheus
+            type: prometheus
+            access: proxy
+            url: http://localhost:9090
+            basicAuth: false
+            withCredentials: false
+            isDefault: false
+            jsonData:
+              tlsSkipVerify: true
+              timeInterval: "5s"
+            editable: true
+            version: 1
+          EOF
+
+          # Dashboard Setup
+          mkdir -p /var/lib/grafana/dashboards
+          wget https://grafana.com/api/dashboards/1860/revisions/33/download -O /var/lib/grafana/dashboards/dashboard_1860.json
+          wget https://grafana.com/api/dashboards/3662/revisions/2/download -O /var/lib/grafana/dashboards/dashboard_3662.json
+          cat << 'EOF' | sudo tee /etc/grafana/provisioning/dashboards/dashboard_provider.yml
+          apiVersion: 1
+
+          providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              editable: true
+              options:
+                path: /var/lib/grafana/dashboards
+          EOF
+
+          # Configure grafana.ini
+          sudo mv /etc/grafana/grafana.ini /etc/grafana/grafana.ini.original
+          cat << EOF | sudo tee /etc/grafana/grafana.ini
+          [server]
+          protocol = https
+          http_port = 3000
+          https_port = 1443
+          domain = $EC2_PUBLIC_DNS_NAME
+          root_url = %(protocol)s://%(domain)s:%(http_port)s
+          cert_file = $CERT_DIR/$EC2_PUBLIC_DNS_NAME.crt
+          cert_key = $CERT_DIR/$EC2_PUBLIC_DNS_NAME.key
+
+          [security]
+          admin_user = ${GrafanaUsername}
+          admin_password = ${GrafanaPassword}
+          cookie_secure = true
+          cookie_samesite = strict
+          disable_gravatar = false
+
+
+          [auth]
+          disable_login_form = false
+          disable_signout_menu = false
+          sigv4_auth_enabled = true
+
+          EOF
+
+          systemctl start grafana-server
+          systemctl enable grafana-server
+
+
+          # Setup Promtail
+          wget https://github.com/grafana/loki/releases/download/v2.4.1/promtail-linux-amd64.zip
+          unzip promtail-linux-amd64.zip
+          mv promtail-linux-amd64 /usr/local/bin/promtail
+          chown promtail:promtail /usr/local/bin/promtail
+
+          cat << 'EOF' | sudo tee /etc/promtail-config.yaml
+          server:
+            http_listen_port: 9080
+            grpc_listen_port: 0
+
+          positions:
+            filename: /tmp/positions.yaml
+
+          clients:
+            - url: https://localhost/loki/api/v1/push
+              basic_auth:
+                username: ${LokiUsername}
+                password: ${LokiPassword}
+              tls_config:
+                ca_file: /etc/ssl/ca/ca.crt
+                cert_file: /etc/ssl/self-signed/localhost.crt
+                key_file: /etc/ssl/self-signed/localhost.key
+                insecure_skip_verify: true
+
+          scrape_configs:
+            - job_name: system
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: system_logs
+                    __path__: /var/log/*.*
+            - job_name: nginx
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: nginx_logs
+                    __path__: /var/log/nginx/*.log
+            - job_name: grafana
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: grafana_logs
+                    __path__: /var/log/grafana/*.log*
+          EOF
+
+          cat << 'EOF' | sudo tee /etc/systemd/system/promtail.service
+          [Unit]
+          Description=Promtail service
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=promtail
+          ExecStart=/usr/local/bin/promtail -config.file=/etc/promtail-config.yaml
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Promtail service
+          sudo systemctl daemon-reload
+          systemctl start promtail
+          systemctl enable promtail
+
+
+Outputs:
+  InstanceId:
+    Description: The Instance ID
+    Value: !Ref CWLokiEC2Instance
+
+  PublicIp:
+    Description: The public IP address
+    Value: !GetAtt CWLokiEC2Instance.PublicIp
+
+  LokiS3Bucket:
+    Description: Loki S3 storage bucket
+    Value: !Ref LokiBucket
+
+  LokiEndPoint:
+    Description: Loki endpoint for Promtail to push logs to
+    Value: !Sub "https://${CWLokiEC2Instance.PublicIp}/loki/api/v1/push"
+
+  GrafanaEndpoint:
+    Description: Grafana Endpoint to visualize Loki logs
+    Value: !Sub "https://${CWLokiEC2Instance.PublicDnsName}:3000"
+
+  InstanceDNSName:
+    Description: DNS name of the EC2 instance
+    Value: !GetAtt CWLokiEC2Instance.PublicDnsName
+
+  CloudWatchLogGroup:
+    Description: CloudWatch Log Group for the EC2 instance logs
+    Value: !Ref CWLokiEC2Instance
